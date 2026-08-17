@@ -14,6 +14,12 @@ Usage:
 Results print as comparison tables (evaluate.py's formatting) and, if --out
 is given, are additionally written to a JSON file for the report's figures
 (Section 6).
+
+FIX 1 (2026-08-15): --nlp-qaoa-maxiter was renamed --qaoa-maxiter and its
+default raised 15 -> 100. Both standard_qaoa and nlp_qaoa now run the
+identical zero-LLM-call mechanism (circuit.py), so there's no longer a
+real-per-iteration-cost reason to budget nlp_qaoa a smaller search budget
+than standard_qaoa -- see circuit.py's module docstring.
 """
 
 import argparse
@@ -24,23 +30,23 @@ from llm import LLM
 from prompts import PROMPTS
 
 
-def run_one(prompt_id: str, llm: LLM, do_alpha_sweep: bool, nlp_qaoa_maxiter: int) -> dict:
+def run_one(prompt_id: str, llm: LLM, do_alpha_sweep: bool, qaoa_maxiter: int) -> dict:
     entry = next(p for p in PROMPTS if p["id"] == prompt_id)
     # prepare_prompt() (clean/baseline/importance/redundancy) is shared
     # between the single-alpha comparison and the sweep below -- neither
     # depends on alpha, so there's no reason to redo it twice.
     prepared = prepare_prompt(entry, llm)
-    result = evaluate_prompt(entry, llm, nlp_qaoa_maxiter=nlp_qaoa_maxiter, prepared=prepared)
+    result = evaluate_prompt(entry, llm, qaoa_maxiter=qaoa_maxiter, prepared=prepared)
     print_comparison_table(result)
     output = {"prompt_id": prompt_id, "comparison": result}
     if do_alpha_sweep:
-        sweep = alpha_sweep(entry, llm, nlp_qaoa_maxiter=min(nlp_qaoa_maxiter, 5), prepared=prepared)
+        sweep = alpha_sweep(entry, llm, qaoa_maxiter=qaoa_maxiter, prepared=prepared)
         print_alpha_sweep_table(prompt_id, sweep)
         output["alpha_sweep"] = sweep
     return output
 
 
-def run_full(llm: LLM, nlp_qaoa_maxiter: int, out_path: str | None = None) -> list[dict]:
+def run_full(llm: LLM, qaoa_maxiter: int, out_path: str | None = None) -> list[dict]:
     """The full report Section 6 table: all 10 prompts x 5 methods, plus
     the full alpha sweep (Section 5 step 12). Colab only -- see module
     docstring / HANDOFF.md Sec 5.
@@ -57,9 +63,9 @@ def run_full(llm: LLM, nlp_qaoa_maxiter: int, out_path: str | None = None) -> li
     all_results = []
     for entry in PROMPTS:
         prepared = prepare_prompt(entry, llm)
-        result = evaluate_prompt(entry, llm, nlp_qaoa_maxiter=nlp_qaoa_maxiter, prepared=prepared)
+        result = evaluate_prompt(entry, llm, qaoa_maxiter=qaoa_maxiter, prepared=prepared)
         print_comparison_table(result)
-        sweep = alpha_sweep(entry, llm, nlp_qaoa_maxiter=nlp_qaoa_maxiter, prepared=prepared)
+        sweep = alpha_sweep(entry, llm, qaoa_maxiter=qaoa_maxiter, prepared=prepared)
         print_alpha_sweep_table(entry["id"], sweep)
         all_results.append({"prompt_id": entry["id"], "comparison": result, "alpha_sweep": sweep})
 
@@ -81,8 +87,9 @@ def main():
     )
     parser.add_argument("--alpha-sweep", action="store_true", help="Also run a small local alpha sweep for --prompt.")
     parser.add_argument(
-        "--nlp-qaoa-maxiter", type=int, default=15,
-        help="COBYLA iteration budget for NLP-QAOA (1 real LLM call each, report Section 4.6).",
+        "--qaoa-maxiter", type=int, default=100,
+        help="COBYLA iteration budget for BOTH QAOA variants (standard_qaoa and nlp_qaoa -- "
+             "FIX 1: they share the identical zero-LLM-call mechanism now, see circuit.py).",
     )
     parser.add_argument(
         "--full", action="store_true",
@@ -105,11 +112,11 @@ def main():
     if args.full:
         # run_full() checkpoints to args.out after EVERY prompt, not just
         # once at the end -- see its docstring.
-        results = run_full(llm, args.nlp_qaoa_maxiter, out_path=args.out)
+        results = run_full(llm, args.qaoa_maxiter, out_path=args.out)
         if args.out:
             print(f"\nfinal results confirmed at {args.out} (checkpointed incrementally during the run)")
     else:
-        results = [run_one(args.prompt, llm, args.alpha_sweep, args.nlp_qaoa_maxiter)]
+        results = [run_one(args.prompt, llm, args.alpha_sweep, args.qaoa_maxiter)]
         if args.out:
             with open(args.out, "w") as f:
                 json.dump(results, f, indent=2, default=str)

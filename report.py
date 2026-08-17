@@ -23,14 +23,19 @@ Produces, in --out-dir (default: alongside results.json):
                           (report Section 5 step 12's figure).
 A summary table (with a win-rate column) also prints to stdout.
 
-Win-rate note: deliberately NOT based on qubo "cost". nlp_qaoa's cost is a
-real similarity-based objective (circuit.py) on a different scale than the
-other four methods' bitstring_cost() -- comparing raw cost across all 5
-would be apples-to-oranges (see circuit.py's module docstring for why).
-Token count and similarity are both measured the same way (one real final
-verification LLM call, evaluate.py's _final_verify()) for every method, so
-those ARE comparable: a method "wins" a prompt if it produced the fewest
-optimized tokens among methods that stayed at or above --similarity-floor.
+Win-rate note: deliberately NOT based on qubo "cost", even though FIX 1
+(2026-08-15) made cost directly comparable across all Q-based methods now
+(nlp_qaoa minimizes the identical bitstring_cost(Q) as everyone else --
+see circuit.py's module docstring). Token count and similarity stay the
+fairer comparison anyway, since naive_greedy_llm (FIX 5) never tries to
+minimize Q at all, so its "cost" number, while computed for reference, was
+never the thing it optimized for -- comparing it on cost would understate
+it unfairly. Token count and similarity are both measured the same way
+(one real final verification LLM call, evaluate.py's _final_verify()) for
+EVERY method including naive_greedy_llm and brute_force, so those ARE
+comparable across all 7: a method "wins" a prompt if it produced the
+fewest optimized tokens among methods that stayed at or above
+--similarity-floor.
 """
 
 import argparse
@@ -43,13 +48,21 @@ import matplotlib
 matplotlib.use("Agg")  # headless-safe: no display needed locally or on Colab when run as a script
 import matplotlib.pyplot as plt
 
-METHOD_NAMES = ["random_search", "greedy_removal", "simulated_annealing", "standard_qaoa", "nlp_qaoa"]
+# FIX 5 (2026-08-15): added naive_greedy_llm (the QUBO-necessity ablation)
+# and brute_force (the exact-optimum reference row) -- both now appear in
+# main.py --out's JSON, so report.py needs to know about them too.
+METHOD_NAMES = [
+    "random_search", "greedy_removal", "simulated_annealing", "standard_qaoa", "nlp_qaoa",
+    "naive_greedy_llm", "brute_force",
+]
 METHOD_COLORS = {  # fixed, consistent across every plot
     "random_search": "#9e9e9e",
     "greedy_removal": "#4c78a8",
     "simulated_annealing": "#f58518",
     "standard_qaoa": "#54a24b",
     "nlp_qaoa": "#b279a2",
+    "naive_greedy_llm": "#e45756",
+    "brute_force": "#000000",
 }
 DEFAULT_SIMILARITY_FLOOR = 0.85
 
