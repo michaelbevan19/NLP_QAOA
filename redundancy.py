@@ -112,16 +112,52 @@ VECTOR_MODEL = "en_core_web_lg"
 # (must exclude) and review/examine's 0.380 (want to include), and excludes
 # both unrelated pairs (<=0.234).
 #
-# Net effect on the 11-pair table: correctly flags errors/mistakes,
-# bugs/errors, review/examine, classify/categorize, assess/evaluate as
-# redundant (5/6 synonym pairs -- an improvement over the md pass's 4/6);
-# correctly excludes both antonym pairs and both unrelated pairs.
-# extract/identify (0.330, just under the 0.35 cutoff) is the one synonym
-# pair NOT flagged -- a real limitation at this margin, not a bug; recall
-# was never a hard requirement, only correctly excluding antonyms/unrelated
-# pairs is (report Section 4.4).
-SIMILARITY_THRESHOLD = 0.35     # Signal 1: similarity above this = "close"
-NATURALNESS_THRESHOLD = 8.0     # Signal 2: -logprob above this = "unnatural"
+# Net effect on the 11-pair table at SIMILARITY_THRESHOLD=0.35: correctly
+# flags errors/mistakes, bugs/errors, review/examine, classify/categorize,
+# assess/evaluate as redundant (5/6 synonym pairs); correctly excludes both
+# antonym pairs and both unrelated pairs. extract/identify (0.330, just
+# under 0.35) is the one synonym pair NOT flagged -- a real limitation at
+# this margin, not a bug; recall was never a hard requirement, only
+# correctly excluding antonyms/unrelated pairs is (report Section 4.4).
+#
+# --- FIX 3 (2026-08-15): SIMILARITY_THRESHOLD raised 0.35 -> 0.40 -------
+# A real diagnostic run on medical_triage (12 candidates, 66 pairs) found
+# naturalness essentially saturated -- 131/132 direction-readings exceeded
+# NATURALNESS_THRESHOLD -- so at 0.35 the flagged set (35/66, 53%) was
+# effectively driven by similarity alone, with naturalness contributing no
+# real filtering ("a check that fires on nearly everything carries no
+# information"). Re-ran the 11-pair calibration set with BOTH naturalness
+# directions computed (the original table above only checked forward) and
+# tested candidate SIMILARITY_THRESHOLD values against it plus
+# medical_triage, combined with the is_redundant() both-directions change
+# above:
+#
+#   threshold   calib synonyms kept        medical_triage flag rate
+#   0.35        5/6                        52%  (bugs/errors margin 0.121)
+#   0.40        4/6  (loses review/examine) 30%  (bugs/errors margin 0.056)
+#   0.45        4/6  (loses review/examine) 23%  (bugs/errors margin 0.006 -- too fragile)
+#   0.50        3/6  (loses bugs/errors)    15%
+#
+# No threshold in this range ever wrongly flags an antonym/unrelated pair
+# (naturalness alone already excludes urgent/routine at 0.313 and
+# positive/negative regardless of similarity -- both directions fail
+# naturalness for positive/negative: 6.429 and 4.920, both < 8.0).
+#
+# Picked 0.40: keeps both pairs this project repeatedly leans on as
+# canonical examples -- classify/categorize (qubo.py's Figure-3 replication
+# depends on it being flagged, HANDOFF.md Sec 2.5) and bugs/errors (the
+# running naturalness example throughout llm.py/redundancy.py's own
+# docstrings) -- with a real margin (0.056), not 0.45's razor-thin 0.006
+# margin on bugs/errors. Cuts medical_triage's over-flagging nearly in
+# half (52% -> 30%) despite naturalness alone barely moving that number
+# (52% -> 52% from the both-directions change alone, at the OLD 0.35
+# threshold) -- confirming similarity was always the real lever here, not
+# naturalness. control_sentiment's false positives (sentiment/positive,
+# sentiment/negative) are fixed by the both-directions change alone, at
+# every threshold tested (0 pairs flagged from 0.35 through 0.55) -- not
+# by this threshold change.
+SIMILARITY_THRESHOLD = 0.40     # Signal 1: similarity above this = "close"
+NATURALNESS_THRESHOLD = 8.0     # Signal 2: -logprob above this = "unnatural" (unchanged by FIX 3)
 # ------------------------------------------------------------------------
 
 _nlp = None
@@ -159,35 +195,60 @@ def is_redundant(
     nat_threshold: float = NATURALNESS_THRESHOLD,
 ) -> dict:
     """
-    Evaluates both signals for one pair and returns:
-        {"redundant": bool, "similarity": float, "naturalness_penalty": float}
+    Evaluates both signals for the pair (word_i, word_j) and returns:
+        {"redundant": bool, "similarity": float,
+         "naturalness_fwd": float, "naturalness_bwd": float}
 
-    `redundant` is True only if similarity > sim_threshold AND
-    naturalness_penalty > nat_threshold -- both signals must agree.
+    `redundant` is True only if similarity > sim_threshold AND naturalness
+    exceeds nat_threshold in BOTH reading orders (word_i->word_j and
+    word_j->word_i) -- changed from "either order" in FIX 3 (2026-08-15):
+    a real diagnostic run (medical_triage, control_sentiment) found that
+    requiring only one direction let non-antonym, topically-related pairs
+    slip through -- "sentiment"/"positive" and "sentiment"/"negative" on
+    control_sentiment each failed naturalness in ONE direction only (7.520
+    and 7.245 respectively) but passed in the other (8.946 and 9.291), so
+    the old "either" rule flagged both anyway. The true antonym case this
+    design exists to protect, "positive"/"negative", is unaffected by this
+    change -- it already failed naturalness in BOTH directions (6.429 and
+    4.920), so requiring both changes nothing there. See redundant_pairs()
+    for the full before/after numbers.
     """
     sim = semantic_closeness(word_i, word_j)
-    nat = naturalness_penalty(word_i, word_j, llm)
-    redundant = (sim > sim_threshold) and (nat > nat_threshold)
-    return {"redundant": redundant, "similarity": sim, "naturalness_penalty": nat}
+    nat_fwd = naturalness_penalty(word_i, word_j, llm)
+    nat_bwd = naturalness_penalty(word_j, word_i, llm)
+    redundant = (sim > sim_threshold) and (nat_fwd > nat_threshold) and (nat_bwd > nat_threshold)
+    return {"redundant": redundant, "similarity": sim, "naturalness_fwd": nat_fwd, "naturalness_bwd": nat_bwd}
 
 
 def redundant_pairs(candidates: list[dict], llm: LLM) -> list[tuple[int, int]]:
     """
     Given clean.py's candidate list, checks every unordered pair and
     returns the (i, j) index pairs (into `candidates`) flagged redundant.
-    Checks the pair in both word orders (w_i before w_j, and w_j before
-    w_i) since naturalness is directional -- a pair can read naturally in
-    one order and awkwardly in the other -- and flags redundant if EITHER
-    order trips both signals.
+
+    FIX 3 (2026-08-15): a real diagnostic run on medical_triage (12
+    candidates, 66 pairs) found naturalness essentially non-discriminating
+    in single-direction form -- 131/132 direction-readings exceeded
+    NATURALNESS_THRESHOLD, so the flagged set (35/66, 53%) was effectively
+    just "similarity > threshold" alone, with naturalness contributing no
+    real filtering. Two changes were made together (both re-verified
+    against the diagnostic data before landing here, see the module's
+    threshold comment block and redundancy_fix3_notes below):
+      1. is_redundant() now requires BOTH reading orders to exceed
+         NATURALNESS_THRESHOLD (previously either order was enough) --
+         this alone fixed control_sentiment completely (2 false-positive
+         pairs -> 0) without affecting the antonym case it must protect.
+      2. SIMILARITY_THRESHOLD raised 0.35 -> 0.40 (see threshold comment
+         block) -- this is what actually brings medical_triage's rate down
+         (52% -> 30% at the both-directions rule), since naturalness alone
+         wasn't doing enough filtering to fix it on its own.
     """
     flagged = []
     n = len(candidates)
     for i in range(n):
         for j in range(i + 1, n):
             w_i, w_j = candidates[i]["lemma"], candidates[j]["lemma"]
-            forward = is_redundant(w_i, w_j, llm)
-            backward = is_redundant(w_j, w_i, llm)
-            if forward["redundant"] or backward["redundant"]:
+            result = is_redundant(w_i, w_j, llm)
+            if result["redundant"]:
                 flagged.append((i, j))
     return flagged
 
