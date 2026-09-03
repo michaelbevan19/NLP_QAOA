@@ -47,6 +47,19 @@ class LLM:
             model_name, torch_dtype=torch.float32
         ).to(self.device)
         self.model.eval()
+
+        # Qwen ships sampling defaults (temperature=0.7, top_p=0.8,
+        # top_k=20) in its generation_config.json. Every generate() call
+        # here is greedy (do_sample=False), which IGNORES all three -- but
+        # transformers warns loudly about each one on every single call,
+        # which buried real output in noise across whole-suite runs.
+        # Clearing them at the source is purely cosmetic: greedy decoding
+        # never read these values in the first place, so no generation
+        # behaviour changes.
+        self.model.generation_config.temperature = None
+        self.model.generation_config.top_p = None
+        self.model.generation_config.top_k = None
+
         print("[llm.py] model loaded.")
 
     # ------------------------------------------------------------------
@@ -67,19 +80,37 @@ class LLM:
         """
         user_content = prompt if not input_text else f"{prompt}\n\n{input_text}"
         messages = [{"role": "user", "content": user_content}]
-        input_ids = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
+
+        # `return_dict=True` + ** unpacking, NOT a bare positional tensor.
+        # transformers 4.5x changed apply_chat_template's default so that
+        # return_tensors="pt" hands back a BatchEncoding (dict-like), not a
+        # tensor. Passing that positionally made generate() evaluate
+        # `input_ids.shape`, which falls through BatchEncoding.__getattr__
+        # to self.data['shape'] -> KeyError: 'shape', surfacing as the
+        # AttributeError crash at generation/utils.py:2498 on Colab.
+        # Requesting the dict explicitly and unpacking it works on both
+        # 4.46.x (this machine) and 4.5x (Colab).
+        #
+        # It also passes a real attention_mask, which the old code never
+        # did -- hence the "attention mask is not set and cannot be
+        # inferred because pad token is same as eos token" warning on
+        # every call. That warning mattered: Qwen's chat template embeds
+        # <|im_end|> tokens that ARE the eos/pad token, so transformers'
+        # fallback guess could mask genuine prompt positions. Supplying
+        # the correct mask removes that ambiguity.
+        inputs = self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
         ).to(self.device)
 
         with torch.no_grad():
             output_ids = self.model.generate(
-                input_ids,
+                **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
 
-        new_tokens = output_ids[0][input_ids.shape[1]:]
+        new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
     # ------------------------------------------------------------------
@@ -101,6 +132,17 @@ class LLM:
         Mean-over-tokens (not sum) is used so multi-token words aren't
         penalised just for having more sub-word pieces.
         """
+        # NOTE (checked during the transformers 4.5x BatchEncoding fix in
+        # generate() above): this method does NOT have that bug and is
+        # deliberately left as-is. It calls the plain tokenizer (whose
+        # return type did not change across versions) and explicitly
+        # indexes ["input_ids"][0] to get a bare 1-D tensor, which is then
+        # passed to self.model(...) as a forward pass -- never to
+        # .generate(), and never as a BatchEncoding in a positional slot.
+        # Leaving it untouched is also load-bearing: these exact values are
+        # what redundancy.py's NATURALNESS_THRESHOLD (8.0) was calibrated
+        # against in FIX 3, so changing the arithmetic here would silently
+        # invalidate that calibration.
         text = f"{word_i} {word_j}"
         input_ids = self.tokenizer(text, return_tensors="pt")["input_ids"][0].to(self.device)
 
