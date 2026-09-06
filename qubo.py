@@ -62,8 +62,94 @@ IMPORTANCE_SCALE = 10.0   # matches the report's Figure 3 worked-example scale
 # "know"=0.008) still goes positive. Re-verify against real removal-test
 # scores whenever the importance range looks very different from this.
 LENGTH_PENALTY = 1.0      # flat per-token cost added to every diagonal entry
-ALPHA = 4.0               # default redundancy-penalty weight (swept later, Section 5 step 12)
+# ALPHA was 4.0 (an uncalibrated default) until a magnitude audit on real
+# code_review data (2026-09-04) showed the redundancy term was carrying
+# ~99% of the objective's total mass and drowning out the importance
+# signal entirely:
+#
+#   total redundancy cost, all 12 tokens kept:  28 flagged pairs x 4.0 = +112.0
+#   total diagonal contribution, all kept:                              +0.68
+#
+# The diagonal itself was already well balanced -- importance rewards
+# (-11.3) very nearly cancel the flat length penalties (+12.0), netting
+# +0.68. Redundancy was the term out of scale, by roughly 10x. With it
+# that large the solver is not trading linguistic value against length at
+# all; it is simply fleeing flagged pairs, which is what pinned every
+# method against bitstring_cost()'s 2-token floor on real prompts.
+#
+# Recalibrated so redundancy MODULATES rather than dominates: its total
+# should sit in the same order as the diagonal spread (~10), not ~112.
+#   28 pairs x ALPHA ~= 10  ->  ALPHA ~= 0.36
+# Rounded to 0.4. Note this is a per-pair FLAT penalty (see the
+# Q[i][j] line below), so it scales with how many pairs redundancy.py
+# flags -- prompts flagging more pairs feel proportionally more of it.
+ALPHA = 0.4               # default redundancy-penalty weight (swept, Section 5 step 12)
 FLOOR_PENALTY = 1000.0    # large fixed cost if fewer than 2 tokens are kept
+
+# --- soft cardinality penalty (added 2026-09-04) ------------------------
+# WHY THIS EXISTS. The floor penalty above is a HARD guard at 2 tokens,
+# applied post-hoc in bitstring_cost(). It stops total collapse but it does
+# not stop the solver from parking right on top of it -- and that is
+# exactly what was observed on real prompts: every method pinned at 2-3
+# kept tokens. That is not the optimizer balancing a trade-off, it is the
+# optimizer hitting the only wall in the objective.
+#
+# The cause is a magnitude mismatch, measurable in the real code_review
+# numbers: importance scores run 0.008-0.109 (mean ~0.048), so the diagonal
+# reward for keeping a token, -(imp * IMPORTANCE_SCALE) + LENGTH_PENALTY,
+# is at BEST about -0.09 and is positive (i.e. "please drop me") for 11 of
+# 12 tokens. Meanwhile ONE flagged redundant pair costs +ALPHA = +4.0, and
+# real prompts flag 20-33 pairs. Keeping everything therefore costs on the
+# order of +138 against a best-case diagonal reward under -1. Dropping to
+# the floor is not a bug in the solver; it is the correct answer to the
+# question the objective is actually asking.
+#
+# A soft cardinality term gives the objective a reason to sit somewhere
+# other than the wall. lam * (sum(x) - t)^2 expands, using x_i^2 = x_i for
+# binary x, into terms this QUBO can hold exactly:
+#
+#   lam*(sum(x) - t)^2
+#     = lam*(1 - 2t) * sum_i x_i        <- a per-token DIAGONAL shift
+#     + 2*lam        * sum_{i<j} x_i x_j <- a uniform OFF-DIAGONAL term
+#     + lam*t^2                          <- a constant (ignored; adding a
+#                                           constant never moves an argmin)
+#
+# NOTE this does NOT contradict the module docstring above, which says a
+# cardinality constraint "cannot be encoded exactly as a pairwise term
+# without extra qubits". That statement is about a HARD constraint (a step
+# function at a threshold, which genuinely needs slack/ancilla qubits).
+# A SOFT quadratic preference is exactly representable, as shown -- so it
+# lives inside Q, unlike FLOOR_PENALTY which must stay post-hoc.
+#
+# VALUE CHOSEN FROM MEASURED DATA (real code_review importances on the
+# raw-cosine scale, real 28-pair flagged set), not guessed:
+#
+#   lambda    t=40%    t=50%    t=60%     <- tokens kept by the exact optimum
+#     0.00     2/12     2/12     2/12     <- the collapse
+#     0.05     4/12     5/12     5/12
+#     0.10     4/12     5/12     6/12     <- target actually tracked
+#     0.25     5/12     5/12     6/12
+#
+# 0.10 is the smallest weight at which the target fraction is genuinely
+# respected (40/50/60% -> 4/5/6 tokens) rather than ignored. Deliberately
+# NOT larger: at the previous ALPHA=4.0 the same sweep needed lambda>=2 to
+# move the target at all, and at that size the cardinality term contributes
+# ~264 against redundancy's ~112 -- i.e. it stops being a preference and
+# becomes the whole objective, reducing the QUBO to a token-counter and
+# discarding the importance/redundancy signal the pipeline exists to
+# produce. At lambda=0.10 the three forces are peers by construction:
+#   redundancy   28 pairs x ALPHA 0.4      = 11.2
+#   cardinality  66 pairs x 2*lambda       = 13.2
+#   diagonal     importance -11.3 + length +12.0, per-token range -1.17..+0.84
+#
+# HONEST CAVEAT: there is no ground truth for the "correct" number of
+# tokens to keep, so this does not make the result correct -- it makes it
+# non-degenerate and jointly driven by all three signals instead of pinned
+# against bitstring_cost()'s floor by one runaway term. Whether output
+# similarity actually holds up at ~5 tokens is a separate empirical
+# question, answered by a real run, not by this constant.
+CARDINALITY_WEIGHT = 0.1   # lam; 0.0 disables the term entirely
+CARDINALITY_TARGET_FRACTION = 0.5  # t = this fraction of n candidates
 
 
 def assemble_qubo(
@@ -73,6 +159,8 @@ def assemble_qubo(
     alpha: float = ALPHA,
     importance_scale: float = IMPORTANCE_SCALE,
     length_penalty: float = LENGTH_PENALTY,
+    cardinality_weight: float = CARDINALITY_WEIGHT,
+    cardinality_target_fraction: float = CARDINALITY_TARGET_FRACTION,
 ) -> list[list[float]]:
     """
     candidates:             clean.py candidate dicts, length n (only used
@@ -83,6 +171,10 @@ def assemble_qubo(
     importance_scores:      list[float] length n, in [0, 1].
     redundant_index_pairs:  list[(i, j)] with i < j, from
                              redundancy.redundant_pairs().
+    cardinality_weight:     lam for the soft cardinality penalty (see the
+                             comment block above). 0.0 disables it.
+    cardinality_target_fraction:
+                            target kept-token count as a fraction of n.
     Returns an n x n matrix (list of lists). Only Q[i][i] and Q[i][j] for
     i < j are populated; Q[j][i] for j > i is left at 0 and never read
     (upper-triangular storage, matching Figure 3 of the report).
@@ -97,6 +189,15 @@ def assemble_qubo(
     for (i, j) in redundant_index_pairs:
         assert i < j, "redundant_index_pairs must be given as (i, j) with i < j"
         Q[i][j] += alpha * 1.0  # NLP_penalty(i, j): fixed "flagged" unit; alpha carries the weight
+
+    if cardinality_weight:
+        target = cardinality_target_fraction * n
+        diag_shift = cardinality_weight * (1.0 - 2.0 * target)
+        pair_shift = 2.0 * cardinality_weight
+        for i in range(n):
+            Q[i][i] += diag_shift
+            for j in range(i + 1, n):
+                Q[i][j] += pair_shift
 
     return Q
 

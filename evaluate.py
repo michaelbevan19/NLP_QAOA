@@ -74,9 +74,15 @@ METHOD_NAMES = [
 REFERENCE_METHOD_NAMES = ["brute_force"]
 ABLATION_METHOD_NAMES = ["naive_greedy_llm"]
 
-# A modest default sweep for local smoke-testing; report Section 5 step 12's
-# real sweep should cover a wider/finer range on Colab once this is verified.
-ALPHA_SWEEP_VALUES = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+# Sweep range re-centred 2026-09-04 alongside qubo.ALPHA's recalibration
+# (4.0 -> 0.4). The old range [0.5 ... 16.0] sat entirely AT or ABOVE the
+# value the magnitude audit identified as reasonable, so every point in it
+# was in the regime where redundancy dominates the objective -- the sweep
+# could only ever show degrees of over-penalisation, never the balanced
+# region. This brackets 0.4 geometrically instead, keeping a top end near
+# the old default so the previous (over-penalised) behaviour is still
+# visible for comparison in the report.
+ALPHA_SWEEP_VALUES = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2]
 
 # FIX 1: standard_qaoa and nlp_qaoa are now two independent runs of the
 # identical mechanism (circuit.py) -- giving them the same `seed` would
@@ -383,6 +389,13 @@ def alpha_sweep(
             survivors = surviving_redundant_pairs(m["bitstring"], prepared["redundant_pairs"]) if m["bitstring"] else []
             row[f"{name}_surviving"] = len(survivors)
             row[f"{name}_kept_tokens"] = m["kept_tokens"]
+            # Recording similarity per alpha (added 2026-09-04) is what makes
+            # "pick the alpha just before similarity falls off a cliff"
+            # answerable at all. The sweep previously tracked only
+            # kept_tokens and surviving pairs, so any alpha recommendation
+            # based on output quality was unsupported by the data we
+            # actually collected.
+            row[f"{name}_similarity"] = m["similarity"]
         sweep_results.append(row)
     return sweep_results
 
@@ -393,11 +406,15 @@ def print_alpha_sweep_table(prompt_id: str, sweep_results: list[dict]):
     print(header)
     print("-" * len(header))
     for row in sweep_results:
-        cells = " | ".join(
-            f"{row[f'{n}_kept_tokens']:>3d}kept/{row[f'{n}_surviving']:>2d}surv"
-            for n in METHOD_NAMES
-        )
-        print(f"{row['alpha']:6.2f} {row['n_redundant_pairs']:10d} | {cells}")
+        cells = []
+        for n in METHOD_NAMES:
+            sim = row.get(f"{n}_similarity")
+            sim_str = f"{sim:.2f}" if sim is not None else " n/a"
+            cells.append(f"{row[f'{n}_kept_tokens']:>2d}k/{row[f'{n}_surviving']:>2d}s/{sim_str}")
+        print(f"{row['alpha']:6.2f} {row['n_redundant_pairs']:10d} | " + " | ".join(cells))
+    print("  (cells: <kept tokens>k / <surviving redundant pairs>s / <output similarity>)")
+    print("  Similarity is the column to watch when choosing alpha -- the useful value is")
+    print("  the largest alpha BEFORE similarity drops, not the one that compresses most.")
 
 
 if __name__ == "__main__":

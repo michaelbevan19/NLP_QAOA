@@ -41,6 +41,11 @@ def naive_greedy_llm(
     candidates: list[dict],
     llm,
     scorer,
+    # 0.85 on the RAW COSINE scale (scoring.py stopped mapping cosine
+    # through (cos+1)/2 on 2026-09-04). The number is unchanged but the
+    # bar is now materially stricter: old 0.85-mapped was only cosine
+    # 0.70. On measured code_review data this rejects the degenerate
+    # 2-token result (0.758 raw) that the old scale accepted.
     similarity_threshold: float = 0.85,
 ) -> dict:
     """

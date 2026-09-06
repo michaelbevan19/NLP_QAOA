@@ -64,6 +64,11 @@ METHOD_COLORS = {  # fixed, consistent across every plot
     "naive_greedy_llm": "#e45756",
     "brute_force": "#000000",
 }
+# 0.85 on the RAW COSINE scale -- scoring.py stopped mapping cosine through
+# (cos+1)/2 on 2026-09-04, so this constant's VALUE is unchanged but its
+# MEANING is now much stricter (old 0.85-mapped was merely cosine 0.70,
+# about the midpoint of the achievable range). Comparing win-rates across
+# results files produced before and after that date is invalid.
 DEFAULT_SIMILARITY_FLOOR = 0.85
 
 

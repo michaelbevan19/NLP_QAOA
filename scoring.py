@@ -59,14 +59,37 @@ class BaselineScorer:
         return self.o_original
 
     def output_similarity(self, output_text: str) -> float:
-        """Cosine similarity between `output_text` and O_original, mapped
-        from [-1, 1] to [0, 1] (1 = identical meaning, 0 = opposite)."""
+        """
+        RAW cosine similarity between `output_text` and O_original.
+        1.0 = identical meaning, ~0.0 = unrelated.
+
+        This used to return (cos + 1) / 2, mapping [-1, 1] onto [0, 1].
+        That was removed (2026-09-04) because it made every score look far
+        stronger than it was: unrelated text scored 0.5 rather than 0, so
+        the real usable range was only [0.5, 1.0] and a "similarity of
+        0.85" actually meant a cosine of just 0.70 -- roughly the midpoint
+        of the achievable range, not a high bar. Every acceptance
+        threshold in the project was reading against that inflated scale.
+
+        Measured consequence of dropping the mapping (code_review, all 12
+        removal tests): importance = 1 - similarity EXACTLY doubles for
+        every token (verified: ratio 2.000 on all 12). That in turn
+        quadruples the number of tokens the QUBO wants to keep -- tokens
+        with a negative (keep-rewarded) diagonal went from 1/12 to 4/12 --
+        because importance now clears qubo.py's breakeven far more often.
+
+        Callers comparing against a threshold must use RAW-scale values.
+        The 0.85 bars in report.py / naive_baseline.py are deliberately
+        kept at 0.85 but now mean cosine 0.85, a materially stricter test
+        than the old 0.85-mapped (= cosine 0.70) -- strict enough to
+        reject the degenerate 2-token results that previously passed
+        (code_review's 2-token output scores 0.758 raw).
+        """
         if self.o_original is None:
             raise RuntimeError("capture_baseline() must be called first")
         embedder = _get_embedder()
         emb = embedder.encode(output_text, convert_to_tensor=True)
-        cos_sim = st_util.cos_sim(emb, self.o_original_embedding).item()
-        return (cos_sim + 1.0) / 2.0
+        return st_util.cos_sim(emb, self.o_original_embedding).item()
 
     def score(self, candidate_tokens: list[dict]) -> float:
         """
