@@ -175,7 +175,7 @@ def run_frontier(prompt_entry, llm, alpha_ratio=ALPHA_RATIO, min_tokens=MIN_TOKE
     n = len(candidates)
 
     scorer = BaselineScorer(llm, prompt, sample_input)
-    scorer.capture_baseline()
+    o_original = scorer.capture_baseline()
 
     importance = []
     for i in range(n):
@@ -208,6 +208,7 @@ def run_frontier(prompt_entry, llm, alpha_ratio=ALPHA_RATIO, min_tokens=MIN_TOKE
         "prompt_id": prompt_entry["id"],
         "original_prompt": prompt,
         "original_tokens": scorer.original_token_count,
+        "o_original": o_original,
         "n_candidates": n,
         "redundant_pairs": pairs,
         "importance": importance,
