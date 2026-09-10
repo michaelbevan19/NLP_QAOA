@@ -199,10 +199,50 @@ def print_frontier_summary(results):
     print(bar)
 
 
+def load_builtin_prompts(n=None, seed=0):
+    """
+    The original hand-written prompts.py set -- the "bloated" prompts this
+    pipeline was actually designed around, deliberately padded with
+    politeness and synonym groups ("bugs or errors or mistakes") precisely
+    so there is redundancy to remove.
+
+    This is the fairest test of the frontier: Dolly's rows had nothing to
+    compress (median 10 words, load-bearing entity lists), so a poor result
+    there is expected. If measured-knee selection does not help HERE, on
+    prompts built to be compressible, it does not help anywhere.
+
+    No filtering or sampling logic is needed -- prompts.py IS the reference
+    entry shape, so entries pass through untouched. `n` only truncates.
+    """
+    import random as _random
+
+    from prompts import PROMPTS
+
+    entries = list(PROMPTS)
+    if n and n < len(entries):
+        entries = _random.Random(seed).sample(entries, n)
+
+    groups = {e["id"]: e["domain"] for e in entries}
+    wc = [len(e["prompt"].split()) for e in entries]
+    with_ctx = sum(1 for e in entries if (e.get("sample_input") or "").strip())
+    stats = {
+        "dataset": "prompts.py (hand-written 'bloated' set)",
+        "total_rows": len(PROMPTS),
+        "eligible_rows": len(PROMPTS),   # no filter applies; all are eligible
+        "sampled": len(entries),
+        "with_context": with_ctx,
+        "without_context": len(entries) - with_ctx,
+        "min_words": min(wc) if wc else 0,
+        "max_words": max(wc) if wc else 0,
+    }
+    return entries, groups, stats
+
+
 def main():
     p = argparse.ArgumentParser(description="Dataset evaluation with frontier measured-knee selection.")
-    p.add_argument("--dataset", choices=["dolly", "wildchat"], default="dolly",
-                   help="which dataset loader to use (default: %(default)s)")
+    p.add_argument("--dataset", choices=["dolly", "wildchat", "prompts"], default="dolly",
+                   help="which loader to use; 'prompts' = the hand-written bloated set "
+                        "in prompts.py (default: %(default)s)")
     p.add_argument("--n", type=int, default=10, help="prompts to sample (default: %(default)s)")
     p.add_argument("--out", default=None, help="output JSON (default: <dataset>_frontier_results.json)")
     p.add_argument("--seed", type=int, default=0)
@@ -217,6 +257,10 @@ def main():
 
     if args.dataset == "dolly":
         entries, groups, stats = dataset_eval.load_dataset_prompts(args.n, seed=args.seed)
+    elif args.dataset == "prompts":
+        # --n defaults to 10, which is exactly the full prompts.py set, so
+        # the default run covers all of them rather than sampling.
+        entries, groups, stats = load_builtin_prompts(args.n, seed=args.seed)
     else:
         import wildchat_eval
         entries, groups, stats = wildchat_eval.load_wildchat_prompts(args.n, seed=args.seed)
